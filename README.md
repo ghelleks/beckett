@@ -1,33 +1,49 @@
 # Beckett
 
-Beckett runs the **OODA heartbeat** for Pirandello-style Role workspaces: parse `OODA.md`, run **pre-flight guards**, optionally invoke a **single non-interactive LLM** pass with OODA-only context, and append structured lines to `**.ooda.log`**.
+Beckett provides a Pirandello-aware **Pydantic AI loop runtime**.
 
-**Pirandello** (the `masks` CLI) supplies setup, hooks, `masks index`, sync, reflect, and reference refresh. Beckett does **not** replace Pirandello; it complements it.
+- Canonical command: `beckett loop`
+- Configuration source: role-local `loop.yaml` / `loop.json` / `loop.py`
+- Canonical memory store: filesystem `Memory/**/*.md`
+- Semantic memory reads: `mcp_memory_service` SQLite-vec index
+
+Legacy Prefect orchestration and `OODA.md` runtime inputs are removed from the active path.
 
 ## Install
 
 ```bash
-cd cli && uv tool install .
+cd cli
+uv tool install .
 ```
 
-## Usage
+## Core commands
+
+- `beckett roles`
+- `beckett doctor`
+- `beckett status`
+- `beckett loop`
+
+## Loop usage
 
 ```bash
-# Preferred: explicit path to the Role directory (contains OODA.md)
-beckett run ~/Desktop/masks-base/work
+# all roles under MASKS_BASE, every 15 minutes
+beckett loop
 
-# Optional: bare name when MASKS_BASE is set (in env or Desktop/.env)
-beckett run work
+# single role daemon
+beckett loop --role-target work
 
-beckett doctor
-beckett status
+# one-shot run
+beckett loop --once --role-target work
+
+# custom interval
+beckett loop --interval 5m
 ```
 
-See [docs/design.md](docs/design.md) and [docs/specs/beckett-run/SPEC.md](docs/specs/beckett-run/SPEC.md). Orient synthesis skill: [skills/mask-ooda-orient-synthesis/SKILL.md](skills/mask-ooda-orient-synthesis/SKILL.md).
+## References
 
-## Migration from `masks run`
-
-See [MIGRATION.md](MIGRATION.md).
+- [docs/design.md](docs/design.md)
+- [docs/specs/beckett-loop/SPEC.md](docs/specs/beckett-loop/SPEC.md)
+- [docs/specs/beckett-loop/SCENARIOS.md](docs/specs/beckett-loop/SCENARIOS.md)
 
 ## License
 

@@ -1,7 +1,8 @@
-"""``beckett status`` — OODA log summary per Role."""
+"""``beckett status`` — latest loop run summary per role."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import typer
@@ -11,25 +12,14 @@ from beckett.role_path import resolve_role_dir
 from beckett.roles import iter_role_dirs
 
 
-def _last_ooda_ok(role_path: Path) -> str:
-    logf = role_path / ".ooda.log"
-    if not logf.is_file():
-        return "never"
-    lines = logf.read_text(encoding="utf-8", errors="replace").splitlines()
-    for line in reversed(lines):
-        if "OODA_OK" in line:
-            return line.strip()[:80]
-    return "never"
-
-
-def _last_run_line(role_path: Path) -> str:
-    logf = role_path / ".ooda.log"
-    if not logf.is_file():
-        return "never"
-    lines = logf.read_text(encoding="utf-8", errors="replace").splitlines()
-    if not lines:
-        return "never"
-    return lines[-1].strip()[:100]
+def _read_last_run(role_path: Path) -> dict | None:
+    runf = role_path / ".ooda-state" / "last-run.json"
+    if not runf.is_file():
+        return None
+    try:
+        return json.loads(runf.read_text(encoding="utf-8", errors="replace"))
+    except json.JSONDecodeError:
+        return None
 
 
 def status_cmd(role_targets: tuple[str, ...] = ()) -> None:
@@ -38,9 +28,14 @@ def status_cmd(role_targets: tuple[str, ...] = ()) -> None:
     else:
         role_paths = list(iter_role_dirs(resolve_base_path()))
 
-    typer.echo(f"{'ROLE':<16} {'LAST_OODA_OK':<42} {'LAST_LOG_LINE':<100}")
+    typer.echo(f"{'ROLE':<16} {'LAST_RUN':<26} {'TRIGGERED':<12} {'SUCCESS':<8}")
     for role_path in role_paths:
         name = role_path.name
-        typer.echo(
-            f"{name:<16} {_last_ooda_ok(role_path):<42} {_last_run_line(role_path):<100}"
-        )
+        data = _read_last_run(role_path)
+        if not data:
+            typer.echo(f"{name:<16} {'never':<26} {'0/0':<12} {'no':<8}")
+            continue
+        last_run = str(data.get("finished_at", "never"))[:26]
+        trig = f"{data.get('triggered_count', 0)}/{data.get('total_entries', 0)}"
+        success = "yes" if bool(data.get("success", False)) else "no"
+        typer.echo(f"{name:<16} {last_run:<26} {trig:<12} {success:<8}")

@@ -2,7 +2,7 @@
 
 **Context:** See `docs/design.md` for full system design. This spec covers the weekly cross-Role synthesis pass — the one agent that deliberately exercises the global-read rule by reading Memory/ files across all Roles, identifying cross-role patterns, and writing synthesis observations to `personal/Memory/Synthesis/`. Its output is the raw material that `masks reflect` reads when building SELF.md proposals.
 
-**Deliverables:** `skills/ooda-orient-synthesis/SKILL.md`, `guards/ooda-orient-synthesis.sh`. Listed as an Agenda item in `personal/OODA.md` only — not in any work or other Role's OODA.
+**Deliverables:** `skills/ooda-orient-synthesis/SKILL.md` plus loop runtime guard/agent implementation. Listed as an `orient` entry in the personal role `LoopSpec`.
 
 ---
 
@@ -11,10 +11,10 @@
 ### Hard constraints
 
 1. **Must run from `personal/` workspace root.** The skill reads across all Roles' `Memory/` directories and writes to `personal/Memory/Synthesis/`. Running from any other workspace root is an error — the skill must log a warning and exit without performing any reads or writes.
-2. The **guard script** (`guards/ooda-orient-synthesis.sh`) enforces two conditions before the LLM is invoked:
+2. The **guard function** (`mask-ooda-orient-synthesis`) enforces two conditions before the agent is invoked:
    - Today is the configured synthesis day (default: Sunday). Configurable via `SYNTHESIS_DAY` in `$BASE/.env` (0=Sunday … 6=Saturday).
    - Synthesis has not already run this week: no entry in `$BASE/personal/.synthesis.log` dated within the past 7 days.
-   - If either condition fails, the guard exits non-zero. `masks run` logs `OODA_OK` and no LLM is started.
+   - If either condition fails, the guard returns `triggered=false` and no synthesis agent is started.
 3. **Reads Memory/ from every Role** under `$BASE`. It must not skip any Role directory, including newly added Roles not previously seen by synthesis.
 4. **Evidence threshold:** a pattern is valid for synthesis output only if it appears in ≥3 distinct sessions OR ≥2 distinct Roles. Evidence is citeable: specific session dates (from Memory file timestamps or content) and Role names.
 5. **Cross-role filter:** patterns specific to a single Role are not written to `personal/Memory/Synthesis/`. A pattern that appears six times in `work/` but never in any other Role is a ROLE.md candidate, not a SELF.md candidate. The skill may note role-specific patterns in its run summary but must not write them to `personal/Memory/`.
@@ -34,7 +34,7 @@
 
 ### Soft constraints
 
-- When invoked from the OODA loop: runs silently, no user interaction required.
+- When invoked from `beckett loop`: runs silently, no user interaction required.
 - When invoked directly from a session: may present a summary of patterns found before writing, giving the user visibility into what will be committed.
 - The skill should complete in under 60 seconds for a system with ≤500 total Memory files across all Roles.
 
@@ -43,10 +43,10 @@
 ## Proposal format
 
 ### 1. Overview
-How the skill sits in the pipeline: guard → synthesis → masks reflect → PR. What "cross-role pattern" means operationally and how it differs from a role-specific observation.
+How the skill sits in the pipeline: guard function → synthesis agent → masks reflect → PR. What "cross-role pattern" means operationally and how it differs from a role-specific observation.
 
-### 2. Guard script
-The exact guard logic for `guards/ooda-orient-synthesis.sh`: day-of-week check, already-ran-this-week check, how `SYNTHESIS_DAY` is read from the environment.
+### 2. Guard function
+The exact guard logic for `mask-ooda-orient-synthesis`: day-of-week check, already-ran-this-week check, how `SYNTHESIS_DAY` is read from the environment.
 
 ### 3. Memory scan
 Which directories are scanned and in what order. How the skill determines which Role directories exist under `$BASE`. How session dates are inferred from Memory file content or git history.
@@ -73,8 +73,8 @@ See Static Evaluation Metrics.
 | ID   | Name                  | Pass condition                                                                                              |
 |------|-----------------------|-------------------------------------------------------------------------------------------------------------|
 | M-01 | Personal root only    | Skill logs a warning and exits without reading or writing if `$PWD` is not the `personal/` Role directory   |
-| M-02 | Day-of-week guard     | Guard exits non-zero on any day other than the configured `SYNTHESIS_DAY`; no LLM is invoked               |
-| M-03 | Already-ran guard     | Guard exits non-zero if `personal/.synthesis.log` contains an entry dated within the past 7 days            |
+| M-02 | Day-of-week guard     | Guard returns `triggered=false` on any day other than the configured `SYNTHESIS_DAY`; no synthesis agent is invoked |
+| M-03 | Already-ran guard     | Guard returns `triggered=false` if `personal/.synthesis.log` contains an entry dated within the past 7 days |
 | M-04 | All Roles scanned     | Memory/ is read from every Role directory under `$BASE`; no Role is skipped                                 |
 | M-05 | Evidence threshold    | No pattern file is written with fewer than 3 sessions or fewer than 2 Roles of evidence                    |
 | M-06 | Cross-role filter     | No pattern observed only in a single Role is written to `personal/Memory/Synthesis/`                        |

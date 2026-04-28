@@ -9,7 +9,7 @@
 
 ### 1. Normal weekly synthesis — qualifying patterns found and written
 
-It is Sunday. The guard script checks the day and the synthesis log — today is the configured synthesis day and synthesis has not run this week. The LLM is invoked. Across `work/Memory/` and `personal/Memory/`, the skill finds two cross-role patterns: one appearing in five work sessions and two personal sessions, and one appearing in three work sessions and one personal session. Neither pattern currently has a file in `personal/Memory/Synthesis/`.
+It is Sunday. The guard function checks the day and the synthesis log — today is the configured synthesis day and synthesis has not run this week. The synthesis agent is invoked. Across `work/Memory/` and `personal/Memory/`, the skill finds two cross-role patterns: one appearing in five work sessions and two personal sessions, and one appearing in three work sessions and one personal session. Neither pattern currently has a file in `personal/Memory/Synthesis/`.
 
 Questions the proposal must answer:
 - Does the skill write two new files to `personal/Memory/Synthesis/`, one per pattern?
@@ -24,12 +24,12 @@ Metric cross-references: M-04, M-05, M-06, M-07, M-09, M-10, M-11
 
 ### 2. Guard exits — not the synthesis day
 
-`masks run personal` fires at 9:15am on a Tuesday. The guard script checks the day: Tuesday is not Sunday (the configured `SYNTHESIS_DAY`). The guard exits non-zero. `masks run` logs `OODA_OK` and exits without invoking any LLM.
+`beckett loop --once --role-target personal` runs at 9:15am on a Tuesday. The guard function checks the day: Tuesday is not Sunday (the configured `SYNTHESIS_DAY`). The guard returns `triggered=false`, and the synthesis agent is not invoked.
 
 Questions the proposal must answer:
 - Does the guard exit non-zero on Tuesday without running any Memory scan?
 - Is `personal/.synthesis.log` unchanged — no entry written for this non-synthesis run?
-- Does `masks run` handle this as a standard all-fail condition (logging OODA_OK) rather than as an error?
+- Does `beckett loop` handle this as a standard no-trigger condition rather than an error?
 
 Metric cross-references: M-02, M-03, M-10
 
@@ -120,8 +120,8 @@ Metric cross-references: M-01, M-07, M-09, M-10, M-11
 ## Stress Tests
 
 **T1 Guard exits non-zero on any day that is not the configured synthesis day.**  
-On every day of the week except the configured `SYNTHESIS_DAY`, the guard script exits non-zero without performing any Memory scan or writing any log entry.  
-Pass: running the guard script six days out of seven produces no LLM invocation, no synthesis file changes, and no synthesis log entries.
+On every day of the week except the configured `SYNTHESIS_DAY`, the guard function returns `triggered=false` without performing any Memory scan or writing any log entry.  
+Pass: running the guard six days out of seven produces no synthesis-agent invocation, no synthesis file changes, and no synthesis log entries.
 
 **T2 All Role directories under `$BASE` are scanned.**  
 Every Role directory that exists under `$BASE` at run time has its `Memory/` directory read — including Roles added after the last synthesis run.  

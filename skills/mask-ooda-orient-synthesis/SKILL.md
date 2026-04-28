@@ -1,6 +1,6 @@
 # Skill: mask-ooda-orient-synthesis
 
-Ships with **Beckett**. Add this skill name to `personal/OODA.md` under **Orient**; `beckett run` evaluates `guards/mask-ooda-orient-synthesis.sh` before any LLM session.
+Ships with **Beckett**. Register this skill in the personal role `LoopSpec` under **orient**. The loop runtime evaluates the `mask-ooda-orient-synthesis` guard function before invoking the synthesis agent.
 
 **Orient** skill that exercises **global-read**: scan every Role’s `Memory/**/*.md`, detect cross-role patterns, write **only** to `personal/Memory/Synthesis/*.md` and update `personal/Memory/INDEX.md`.
 

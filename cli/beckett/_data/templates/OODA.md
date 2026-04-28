@@ -17,8 +17,8 @@
 
 ## Agenda
 
-Runs every 15 minutes during active hours.
-Pre-flight guards run before any LLM is invoked — if all fail, logs OODA_OK and exits.
+Legacy reference format for older OODA workflows.
+Current Beckett runtime uses `LoopSpec` (`loop.yaml` / `loop.json` / `loop.py`) instead of this file.
 
 ### Observe
 
