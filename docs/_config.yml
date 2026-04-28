@@ -1,0 +1,14 @@
+title: Beckett
+description: "Non-interactive OODA runner for Pirandello-style Role workspaces"
+theme: minima
+baseurl: "/beckett"
+url: "https://ghelleks.github.io"
+
+minima:
+  skin: auto
+
+show_excerpts: true
+
+plugins:
+  - jekyll-feed
+  - jekyll-seo-tag
