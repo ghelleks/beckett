@@ -7,43 +7,62 @@ Beckett provides a Pirandello-aware **Pydantic AI loop runtime**.
 - Canonical memory store: filesystem `Memory/**/*.md`
 - Semantic memory reads: `mcp_memory_service` SQLite-vec index
 
-Legacy Prefect orchestration and `OODA.md` runtime inputs are removed from the active path.
-
-## Install
+## Quick start
 
 ```bash
-cd cli
-uv tool install .
+# 1. Install
+cd cli && uv tool install .
+
+# 2. Create loop.yaml for all roles under MASKS_BASE
+beckett install
+
+# 3. Validate configuration
+beckett doctor
+
+# 4. Preview guard outcomes (no tokens spent)
+beckett loop --dry-run
+
+# 5. Run one full cycle
+beckett loop --once --role-target work
 ```
+
+See [docs/install.md](docs/install.md) for the full step-by-step guide.
 
 ## Core commands
 
-- `beckett roles`
-- `beckett doctor`
-- `beckett status`
-- `beckett loop`
+| Command | Description |
+|---|---|
+| `beckett install` | Create `loop.yaml` for each role (non-destructive) |
+| `beckett roles` | List roles and their spec status |
+| `beckett doctor` | Validate loop specs, registry, and model env |
+| `beckett status` | Show last run summary (`--verbose` for full breakdown) |
+| `beckett loop` | Run the loop daemon or a single cycle |
 
 ## Loop usage
 
 ```bash
-# all roles under MASKS_BASE, every 15 minutes
+# Daemon — all roles, every 15 minutes
 beckett loop
 
-# single role daemon
+# Single role daemon
 beckett loop --role-target work
 
-# one-shot run
+# One-shot run
 beckett loop --once --role-target work
 
-# custom interval
-beckett loop --interval 5m
+# Preview guards without running agents
+beckett loop --dry-run --role-target work
+
+# Force a single skill to run
+beckett loop --skill ooda-observe --role-target work --force
 ```
 
 ## References
 
-- [docs/design.md](docs/design.md)
-- [docs/specs/beckett-loop/SPEC.md](docs/specs/beckett-loop/SPEC.md)
-- [docs/specs/beckett-loop/SCENARIOS.md](docs/specs/beckett-loop/SCENARIOS.md)
+- [docs/install.md](docs/install.md) — Installation and setup guide
+- [docs/design.md](docs/design.md) — Architecture overview
+- [docs/specs/beckett-loop/SPEC.md](docs/specs/beckett-loop/SPEC.md) — Loop specification
+- [docs/specs/beckett-loop/SCENARIOS.md](docs/specs/beckett-loop/SCENARIOS.md) — Behavior scenarios
 
 ## License
 

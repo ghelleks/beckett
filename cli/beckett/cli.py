@@ -8,6 +8,7 @@ import typer
 
 from beckett import __version__
 from beckett.doctor_cmd import doctor_cmd
+from beckett.install_cmd import install_cmd
 from beckett.loop.runner import (
     LoopRunResult,
     SkillRunResult,
@@ -40,6 +41,42 @@ def _main(
     ),
 ) -> None:
     """Beckett CLI."""
+
+
+@app.command("install")
+def install(
+    role_targets: list[str] = typer.Argument(
+        default=None,
+        help="Optional Role paths or names (default: scan MASKS_BASE)",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Overwrite existing loop.yaml files.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Preview what would be created without writing any files.",
+    ),
+) -> None:
+    """Create or update loop.yaml for each role (non-destructive by default).
+
+    Migrates from OODA.md when present; falls back to a default template.
+    Skips roles that already have loop.yaml unless --force is passed.
+
+    Examples:
+
+      beckett install                     # all roles under MASKS_BASE
+
+      beckett install work                # one role only
+
+      beckett install --dry-run           # preview without writing
+
+      beckett install --force             # overwrite existing loop.yaml files
+    """
+    rt: tuple[str, ...] = tuple(role_targets) if role_targets else ()
+    install_cmd(rt, force=force, dry_run=dry_run)
 
 
 @app.command("doctor")
