@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,6 +11,7 @@ from pydantic import BaseModel
 from pydantic_ai import Agent, RunContext
 
 from beckett.loop.deps import RoleDeps
+from beckett.loop.gws_util import guard_timeout, gws_env
 from beckett.loop.skill_agent import build_skill_agent, run_agent
 from beckett.loop.spec import GuardOutcome
 
@@ -22,22 +24,23 @@ class ObserveResult(BaseModel):
     sources: list[str] = []
 
 
-# ── Pydantic AI agent (module-level; no model bound at construction) ──────────
+# ── Pydantic AI agent ─────────────────────────────────────────────────────────
 
 _SYSTEM_PROMPT = """\
 You are the Beckett Observe agent for a Pirandello role.
 
-Your job is to survey incoming signals (email, calendar, memory markers), decide
-which are worth recording as structured observations, draft concise observation
-entries, and write them to the role's Memory/Observations/ directory.
+Survey incoming signals (email, calendar, memory markers), decide which are worth
+recording as structured observations, draft concise observation entries, and write
+them to the role's Memory/Observations/ directory.
 
-Rules:
-- Call get_unread_emails and get_recent_calendar_events to gather signal data.
-- Call get_observer_marker to read any pending observer note; call
-  clear_observer_marker after reading it.
-- Draft observations that are factual and actionable. Skip noise.
-- Call write_memory_file for each observation (subpath like 'Observations/YYYYMMDD-HHmmss').
-- Return a structured ObserveResult with signals_found, files_written, and sources.
+Steps:
+1. Call get_unread_emails to fetch the inbox signal.
+2. Call get_recent_calendar_events to fetch upcoming events.
+3. Call get_observer_marker to read any pending observer note; call
+   clear_observer_marker after reading it.
+4. Draft factual, actionable observations. Skip noise.
+5. Call write_memory_file for each observation (subpath like 'Observations/YYYYMMDD-HHmmss').
+6. Return ObserveResult with signals_found, files_written, and sources.
 """
 
 _observe_agent: Agent = build_skill_agent(
@@ -46,18 +49,15 @@ _observe_agent: Agent = build_skill_agent(
 )
 
 
-# Register skill-specific tools on the module-level agent
 @_observe_agent.tool
 async def get_unread_emails(ctx: RunContext[RoleDeps]) -> str:
     """Fetch unread inbox email summaries for this role's GWS account."""
-    gws_acc = ctx.deps.env.get("GWS_PROFILE", ctx.deps.role)
-    timeout = int(ctx.deps.env.get("BECKETT_GUARD_TIMEOUT", "5"))
+    env = gws_env(ctx.deps)
+    timeout = guard_timeout(ctx.deps)
     try:
         proc = subprocess.run(
-            ["gws", "gmail", "triage", "--account", gws_acc],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+            ["gws", "gmail", "+triage"],
+            capture_output=True, text=True, timeout=timeout, env=env,
         )
         return proc.stdout.strip() or "(no unread emails)"
     except Exception as exc:
@@ -67,15 +67,24 @@ async def get_unread_emails(ctx: RunContext[RoleDeps]) -> str:
 @_observe_agent.tool
 async def get_recent_calendar_events(ctx: RunContext[RoleDeps], hours: int = 4) -> str:
     """Fetch calendar events in the next N hours for this role's GWS account."""
-    gws_acc = ctx.deps.env.get("GWS_PROFILE", ctx.deps.role)
-    timeout = int(ctx.deps.env.get("BECKETT_GUARD_TIMEOUT", "5"))
+    from datetime import timedelta
+    env = gws_env(ctx.deps)
+    timeout = guard_timeout(ctx.deps)
+    now = datetime.now(timezone.utc)
+    time_min = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    time_max = (now + timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    params = json.dumps({
+        "calendarId": "primary",
+        "timeMin": time_min,
+        "timeMax": time_max,
+        "singleEvents": True,
+        "orderBy": "startTime",
+        "maxResults": 10,
+    })
     try:
         proc = subprocess.run(
-            ["gws", "calendar", "events", "list", "--account", gws_acc,
-             "--max-results", "10"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+            ["gws", "calendar", "events", "list", "--params", params],
+            capture_output=True, text=True, timeout=timeout, env=env,
         )
         return proc.stdout.strip() or "(no upcoming events)"
     except Exception as exc:
@@ -86,9 +95,7 @@ async def get_recent_calendar_events(ctx: RunContext[RoleDeps], hours: int = 4) 
 async def get_observer_marker(ctx: RunContext[RoleDeps]) -> str:
     """Read the .ooda-pending/observer.txt marker file if present."""
     marker = ctx.deps.role_dir / ".ooda-pending" / "observer.txt"
-    if marker.is_file():
-        return marker.read_text(encoding="utf-8", errors="replace").strip()
-    return ""
+    return marker.read_text(encoding="utf-8", errors="replace").strip() if marker.is_file() else ""
 
 
 @_observe_agent.tool
@@ -104,26 +111,20 @@ async def clear_observer_marker(ctx: RunContext[RoleDeps]) -> str:
 # ── Guard ─────────────────────────────────────────────────────────────────────
 
 
-def _guard_timeout(deps: RoleDeps) -> int:
-    try:
-        return max(1, int(deps.env.get("BECKETT_GUARD_TIMEOUT") or deps.env.get("MASKS_GUARD_TIMEOUT") or 5))
-    except (ValueError, TypeError):
-        return 5
-
-
 async def observe_guard(deps: RoleDeps) -> GuardOutcome:
     """Trigger if there are unread emails or a pending observer marker."""
-    gws_acc = deps.env.get("GWS_PROFILE", deps.role)
+    env = gws_env(deps)
     try:
         proc = subprocess.run(
-            ["gws", "gmail", "triage", "--account", gws_acc],
-            capture_output=True,
-            text=True,
-            timeout=_guard_timeout(deps),
+            ["gws", "gmail", "+triage"],
+            capture_output=True, text=True, timeout=guard_timeout(deps), env=env,
         )
         if proc.returncode == 0 and proc.stdout.strip():
             lines = len([ln for ln in proc.stdout.splitlines() if ln.strip()])
-            return GuardOutcome(triggered=True, detail=f"{lines} unread")
+            # gws +triage always prints a header line; subtract 1 for actual messages
+            count = max(0, lines - 1)
+            if count > 0:
+                return GuardOutcome(triggered=True, detail=f"{count} unread")
     except Exception:
         pass
 
@@ -137,11 +138,6 @@ async def observe_guard(deps: RoleDeps) -> GuardOutcome:
 
 
 async def observe_agent(deps: RoleDeps, guard: GuardOutcome, context: dict | None = None) -> dict:
-    """Run the observe agent.
-
-    - When BECKETT_MODEL is set: full Pydantic AI orchestration with targeted tools.
-    - Fallback (no model): invokes BECKETT_LLM_CMD subprocess directly.
-    """
     phase_context = ""
     if context and context.get("_phase_triggers"):
         phase_context = f"\nPhase trigger context: {context['_phase_triggers']}"
@@ -160,7 +156,6 @@ async def observe_agent(deps: RoleDeps, guard: GuardOutcome, context: dict | Non
 
     result = await run_agent(_observe_agent, prompt, deps, fallback_result=fallback)
 
-    # Write a minimal observation file when the fallback path runs (no model)
     if not deps.env.get("BECKETT_MODEL", "").strip() and guard.triggered:
         from beckett.loop.memory_tools import write_memory
 

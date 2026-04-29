@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from pydantic_ai import Agent, RunContext
 
 from beckett.loop.deps import RoleDeps
+from beckett.loop.gws_util import guard_timeout, gws_env
 from beckett.loop.skill_agent import VALID_EMAIL_LABELS, build_skill_agent, run_agent
 from beckett.loop.spec import GuardOutcome
 
@@ -25,19 +26,20 @@ class EmailClassificationResult(BaseModel):
 _SYSTEM_PROMPT = """\
 You are the Beckett email classifier for a Pirandello role.
 
-Your job is to classify unread inbox emails that have not yet been labeled by
-the email-agent system. For each email:
+Classify unread inbox emails that have not yet been labeled by the email-agent system.
+
+Steps:
 1. Call get_unclassified_emails to get a list of unlabeled messages.
 2. For each message, call get_email_body to read the full content.
 3. Decide the correct label: reply_needed, review, todo, or summarize.
 4. Call apply_gmail_label to apply the label.
 
-Rules:
-- reply_needed: email requires a personal response from you.
+Label guide:
+- reply_needed: requires a personal response from you.
 - review: FYI, newsletters, announcements — read but no action.
-- todo: contains an actionable task you need to track.
+- todo: actionable task you need to track.
 - summarize: long thread or document to summarize later.
-- Skip emails that are clearly automated noise or spam.
+- Skip clearly automated noise or spam.
 
 Return EmailClassificationResult with totals.
 """
@@ -50,18 +52,15 @@ _email_agent: Agent = build_skill_agent(
 
 @_email_agent.tool
 async def get_unclassified_emails(ctx: RunContext[RoleDeps]) -> str:
-    """List inbox emails that have not yet received an email-agent label."""
-    gws_acc = ctx.deps.env.get("GWS_PROFILE", ctx.deps.role)
-    timeout = int(ctx.deps.env.get("BECKETT_GUARD_TIMEOUT", "5"))
+    """List unread inbox emails for classification."""
+    env = gws_env(ctx.deps)
+    timeout = guard_timeout(ctx.deps)
     try:
         proc = subprocess.run(
-            ["gws", "gmail", "triage", "--account", gws_acc,
-             "--filter", "-label:reply_needed -label:review -label:todo -label:summarize"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+            ["gws", "gmail", "+triage"],
+            capture_output=True, text=True, timeout=timeout, env=env,
         )
-        return proc.stdout.strip() or "(no unclassified emails)"
+        return proc.stdout.strip() or "(no emails)"
     except Exception as exc:
         return f"(error: {exc})"
 
@@ -69,15 +68,14 @@ async def get_unclassified_emails(ctx: RunContext[RoleDeps]) -> str:
 @_email_agent.tool
 async def get_email_body(ctx: RunContext[RoleDeps], email_id: str) -> str:
     """Fetch the full body of an email by its message ID."""
-    gws_acc = ctx.deps.env.get("GWS_PROFILE", ctx.deps.role)
-    timeout = int(ctx.deps.env.get("BECKETT_GUARD_TIMEOUT", "5"))
+    import json
+    env = gws_env(ctx.deps)
+    timeout = guard_timeout(ctx.deps)
+    params = json.dumps({"id": email_id, "format": "full"})
     try:
         proc = subprocess.run(
-            ["gws", "gmail", "messages", "get", "--account", gws_acc,
-             "--id", email_id, "--format", "full"],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+            ["gws", "gmail", "messages", "get", "--params", params],
+            capture_output=True, text=True, timeout=timeout, env=env,
         )
         return proc.stdout.strip() or "(empty body)"
     except Exception as exc:
@@ -86,18 +84,17 @@ async def get_email_body(ctx: RunContext[RoleDeps], email_id: str) -> str:
 
 @_email_agent.tool
 async def apply_gmail_label(ctx: RunContext[RoleDeps], email_id: str, label: str) -> str:
-    """Apply an email-agent label to a message. Only valid labels are accepted (Rule 3)."""
+    """Apply an email-agent label to a message. Only valid labels are accepted."""
     if label not in VALID_EMAIL_LABELS:
-        return f"rejected: '{label}' is not a valid email-agent label ({sorted(VALID_EMAIL_LABELS)})"
-    gws_acc = ctx.deps.env.get("GWS_PROFILE", ctx.deps.role)
-    timeout = int(ctx.deps.env.get("BECKETT_GUARD_TIMEOUT", "5"))
+        return f"rejected: '{label}' is not a valid label ({sorted(VALID_EMAIL_LABELS)})"
+    import json
+    env = gws_env(ctx.deps)
+    timeout = guard_timeout(ctx.deps)
+    params = json.dumps({"id": email_id, "addLabelIds": [label]})
     try:
         proc = subprocess.run(
-            ["gws", "gmail", "labels", "apply", "--account", gws_acc,
-             "--id", email_id, "--label", label],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+            ["gws", "gmail", "messages", "modify", "--params", params],
+            capture_output=True, text=True, timeout=timeout, env=env,
         )
         return "applied" if proc.returncode == 0 else f"error: {proc.stderr.strip()[:200]}"
     except Exception as exc:
@@ -107,26 +104,19 @@ async def apply_gmail_label(ctx: RunContext[RoleDeps], email_id: str, label: str
 # ── Guard ─────────────────────────────────────────────────────────────────────
 
 
-def _guard_timeout(deps: RoleDeps) -> int:
-    try:
-        return max(1, int(deps.env.get("BECKETT_GUARD_TIMEOUT") or deps.env.get("MASKS_GUARD_TIMEOUT") or 5))
-    except (ValueError, TypeError):
-        return 5
-
-
 async def email_classifier_guard(deps: RoleDeps) -> GuardOutcome:
     """Trigger if there are unread emails in the inbox."""
-    gws_acc = deps.env.get("GWS_PROFILE", deps.role)
+    env = gws_env(deps)
     try:
         proc = subprocess.run(
-            ["gws", "gmail", "triage", "--account", gws_acc],
-            capture_output=True,
-            text=True,
-            timeout=_guard_timeout(deps),
+            ["gws", "gmail", "+triage"],
+            capture_output=True, text=True, timeout=guard_timeout(deps), env=env,
         )
         if proc.returncode == 0 and proc.stdout.strip():
             lines = len([ln for ln in proc.stdout.splitlines() if ln.strip()])
-            return GuardOutcome(triggered=True, detail=f"{lines} unread")
+            count = max(0, lines - 1)  # subtract header line
+            if count > 0:
+                return GuardOutcome(triggered=True, detail=f"{count} unread")
     except Exception:
         pass
     return GuardOutcome(triggered=False, detail="no unread")
@@ -138,11 +128,6 @@ async def email_classifier_guard(deps: RoleDeps) -> GuardOutcome:
 async def email_classifier_agent(
     deps: RoleDeps, guard: GuardOutcome, context: dict | None = None
 ) -> dict:
-    """Run the email classifier agent.
-
-    - When BECKETT_MODEL is set: Pydantic AI fetches each email and classifies it.
-    - Fallback: calls invoke_claude with the signal detail as context.
-    """
     phase_context = ""
     if context and context.get("_phase_triggers"):
         phase_context = f"\nPhase trigger context: {context['_phase_triggers']}"
