@@ -44,16 +44,16 @@ MINIMAL_SPEC_YAML = textwrap.dedent("""\
 def _git_init(path: Path) -> None:
     """Initialize a bare git repo so commit_role_changes can commit."""
     subprocess.run(["git", "init", str(path)], capture_output=True, check=True)
-    subprocess.run(
-        ["git", "-C", str(path), "config", "user.email", "test@beckett"],
-        capture_output=True,
-        check=True,
-    )
-    subprocess.run(
-        ["git", "-C", str(path), "config", "user.name", "Beckett Test"],
-        capture_output=True,
-        check=True,
-    )
+    for key, val in [
+        ("user.email", "test@beckett"),
+        ("user.name", "Beckett Test"),
+        ("commit.gpgsign", "false"),
+    ]:
+        subprocess.run(
+            ["git", "-C", str(path), "config", key, val],
+            capture_output=True,
+            check=True,
+        )
     subprocess.run(
         ["git", "-C", str(path), "commit", "--allow-empty", "-m", "init"],
         capture_output=True,

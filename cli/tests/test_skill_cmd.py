@@ -44,11 +44,11 @@ def _make_role(
     (role_dir / "Memory").mkdir()
     (role_dir / "Memory" / "INDEX.md").write_text("| File | Summary | Tags |\n|---|---|---|\n")
     if with_git:
-        import subprocess
-        subprocess.run(["git", "init", str(role_dir)], capture_output=True, check=True)
-        subprocess.run(["git", "-C", str(role_dir), "config", "user.email", "t@test"], capture_output=True)
-        subprocess.run(["git", "-C", str(role_dir), "config", "user.name", "T"], capture_output=True)
-        subprocess.run(["git", "-C", str(role_dir), "commit", "--allow-empty", "-m", "init"], capture_output=True)
+        import subprocess as _sp
+        _sp.run(["git", "init", str(role_dir)], capture_output=True, check=True)
+        for _k, _v in [("user.email", "t@test"), ("user.name", "T"), ("commit.gpgsign", "false")]:
+            _sp.run(["git", "-C", str(role_dir), "config", _k, _v], capture_output=True)
+        _sp.run(["git", "-C", str(role_dir), "commit", "--allow-empty", "-m", "init"], capture_output=True)
     return base, role_dir
 
 

@@ -146,16 +146,52 @@ async def observe_guard(deps: RoleDeps) -> GuardOutcome:
 # ── Agent ─────────────────────────────────────────────────────────────────────
 
 
+def _fetch_signals(deps: RoleDeps) -> dict:
+    """Pre-fetch signal data via Python tools for the subprocess delegation path.
+
+    Returns empty signals quickly when no GWS config is present (e.g. in tests).
+    """
+    env = gws_env(deps)
+    timeout = guard_timeout(deps)
+    # Skip gws calls when no real GWS config dir exists (test environments)
+    config_dir = env.get("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "")
+    if not config_dir or not Path(config_dir).is_dir():
+        marker_text = ""
+        marker = deps.role_dir / ".ooda-pending" / "observer.txt"
+        if marker.is_file():
+            marker_text = marker.read_text(encoding="utf-8", errors="replace").strip()
+        return {"emails": [], "marker": marker_text}
+
+    # Emails
+    emails: list[dict] = []
+    try:
+        proc = subprocess.run(
+            ["gws", "gmail", "+triage", "--format", "json"],
+            capture_output=True, text=True, timeout=timeout, env=env,
+        )
+        if proc.returncode == 0:
+            raw = "\n".join(
+                ln for ln in proc.stdout.splitlines() if not ln.startswith("Using")
+            ).strip()
+            if raw:
+                parsed = json.loads(raw)
+                emails = parsed if isinstance(parsed, list) else []
+    except Exception:
+        pass
+
+    # Observer marker
+    marker_text = ""
+    marker = deps.role_dir / ".ooda-pending" / "observer.txt"
+    if marker.is_file():
+        marker_text = marker.read_text(encoding="utf-8", errors="replace").strip()
+
+    return {"emails": emails, "marker": marker_text}
+
+
 async def observe_agent(deps: RoleDeps, guard: GuardOutcome, context: dict | None = None) -> dict:
     phase_context = ""
     if context and context.get("_phase_triggers"):
         phase_context = f"\nPhase trigger context: {context['_phase_triggers']}"
-
-    prompt = (
-        f"Role: {deps.role}\n"
-        f"Trigger: {guard.detail}{phase_context}\n\n"
-        "Survey this role's incoming signals and write structured observations."
-    )
 
     fallback: dict = {
         "signals_found": 1 if guard.triggered else 0,
@@ -163,24 +199,73 @@ async def observe_agent(deps: RoleDeps, guard: GuardOutcome, context: dict | Non
         "sources": [guard.detail],
     }
 
-    result = await run_agent(_observe_agent, prompt, deps, fallback_result=fallback)
+    model = deps.env.get("BECKETT_MODEL", "").strip()
+    llm_cmd = (deps.env.get("BECKETT_LLM_CMD") or deps.env.get("MASKS_LLM_CMD") or "").strip()
 
-    if not deps.env.get("BECKETT_MODEL", "").strip() and guard.triggered:
+    if model:
+        # Full Pydantic AI path — model orchestrates tool calls
+        prompt = (
+            f"Role: {deps.role}\n"
+            f"Trigger: {guard.detail}{phase_context}\n\n"
+            "Survey this role's incoming signals and write structured observations."
+        )
+        return await run_agent(_observe_agent, prompt, deps, fallback_result=fallback)
+
+    if llm_cmd and guard.triggered:
+        # Subprocess delegation path — pre-fetch signals in Python, ask claude
+        # to generate observation text only (not perform agentic work).
+        signals = _fetch_signals(deps)
+        email_lines = "\n".join(
+            f"  - {m.get('from', '?')} — {m.get('subject', '(no subject)')}"
+            for m in signals["emails"][:10]
+        ) or "  (none)"
+        marker_line = f"Observer marker: {signals['marker']}" if signals["marker"] else ""
+
+        prompt = (
+            f"Role: {deps.role}\n"
+            f"Trigger: {guard.detail}{phase_context}\n\n"
+            f"Unread emails ({len(signals['emails'])}):\n{email_lines}\n"
+            + (f"{marker_line}\n" if marker_line else "")
+            + "\nWrite a concise structured observation note (3-8 bullet points) "
+            "summarising what signals are present and what they suggest about "
+            "priorities or attention needed. Use markdown. Do not call any tools."
+        )
+
+        from beckett.loop.claude import invoke_claude
         from beckett.loop.memory_tools import write_memory
 
         now = datetime.now(timezone.utc)
-        content = "\n".join([
-            "# Observation",
-            "",
-            f"- Timestamp: {now.isoformat(timespec='seconds')}",
-            f"- Role: {deps.role}",
-            f"- Trigger: {guard.detail}",
-        ])
+        try:
+            output = invoke_claude(deps, prompt)
+            content = output.strip() or (
+                f"# Observation\n\n- Trigger: {guard.detail}\n"
+                f"- Emails: {len(signals['emails'])} unread\n"
+            )
+        except Exception:
+            content = (
+                f"# Observation\n\n- Trigger: {guard.detail}\n"
+                f"- Emails: {len(signals['emails'])} unread\n"
+            )
+
         sub = Path("Observations") / now.strftime("%Y%m%d-%H%M%S")
         try:
             write_memory(deps, str(sub), content)
-            result = {**result, "files_written": result.get("files_written", 0) + 1}
+            return {"signals_found": len(signals["emails"]) + bool(signals["marker"]),
+                    "files_written": 1, "sources": [guard.detail]}
+        except Exception:
+            return fallback
+
+    # No model and no LLM cmd — write minimal stub
+    if guard.triggered:
+        from beckett.loop.memory_tools import write_memory
+
+        now = datetime.now(timezone.utc)
+        content = f"# Observation\n\n- Timestamp: {now.isoformat(timespec='seconds')}\n- Trigger: {guard.detail}\n"
+        sub = Path("Observations") / now.strftime("%Y%m%d-%H%M%S")
+        try:
+            write_memory(deps, str(sub), content)
+            return {**fallback, "files_written": 1}
         except Exception:
             pass
 
-    return result
+    return fallback
