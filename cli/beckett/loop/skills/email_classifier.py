@@ -109,14 +109,19 @@ async def email_classifier_guard(deps: RoleDeps) -> GuardOutcome:
     env = gws_env(deps)
     try:
         proc = subprocess.run(
-            ["gws", "gmail", "+triage"],
+            ["gws", "gmail", "+triage", "--format", "json"],
             capture_output=True, text=True, timeout=guard_timeout(deps), env=env,
         )
-        if proc.returncode == 0 and proc.stdout.strip():
-            lines = len([ln for ln in proc.stdout.splitlines() if ln.strip()])
-            count = max(0, lines - 1)  # subtract header line
-            if count > 0:
-                return GuardOutcome(triggered=True, detail=f"{count} unread")
+        if proc.returncode == 0:
+            raw = "\n".join(
+                ln for ln in proc.stdout.splitlines() if not ln.startswith("Using")
+            ).strip()
+            if raw:
+                import json
+                messages = json.loads(raw)
+                count = len(messages)
+                if count > 0:
+                    return GuardOutcome(triggered=True, detail=f"{count} unread")
     except Exception:
         pass
     return GuardOutcome(triggered=False, detail="no unread")

@@ -51,15 +51,20 @@ _observe_agent: Agent = build_skill_agent(
 
 @_observe_agent.tool
 async def get_unread_emails(ctx: RunContext[RoleDeps]) -> str:
-    """Fetch unread inbox email summaries for this role's GWS account."""
+    """Fetch unread inbox email summaries for this role's GWS account (JSON array)."""
     env = gws_env(ctx.deps)
     timeout = guard_timeout(ctx.deps)
     try:
         proc = subprocess.run(
-            ["gws", "gmail", "+triage"],
+            ["gws", "gmail", "+triage", "--format", "json"],
             capture_output=True, text=True, timeout=timeout, env=env,
         )
-        return proc.stdout.strip() or "(no unread emails)"
+        if proc.returncode == 0:
+            raw = "\n".join(
+                ln for ln in proc.stdout.splitlines() if not ln.startswith("Using")
+            ).strip()
+            return raw or "[]"
+        return "[]"
     except Exception as exc:
         return f"(error fetching emails: {exc})"
 
@@ -116,15 +121,19 @@ async def observe_guard(deps: RoleDeps) -> GuardOutcome:
     env = gws_env(deps)
     try:
         proc = subprocess.run(
-            ["gws", "gmail", "+triage"],
+            ["gws", "gmail", "+triage", "--format", "json"],
             capture_output=True, text=True, timeout=guard_timeout(deps), env=env,
         )
-        if proc.returncode == 0 and proc.stdout.strip():
-            lines = len([ln for ln in proc.stdout.splitlines() if ln.strip()])
-            # gws +triage always prints a header line; subtract 1 for actual messages
-            count = max(0, lines - 1)
-            if count > 0:
-                return GuardOutcome(triggered=True, detail=f"{count} unread")
+        if proc.returncode == 0:
+            # Strip the "Using keyring backend" line before parsing JSON
+            raw = "\n".join(
+                ln for ln in proc.stdout.splitlines() if not ln.startswith("Using")
+            ).strip()
+            if raw:
+                messages = json.loads(raw)
+                count = len(messages)
+                if count > 0:
+                    return GuardOutcome(triggered=True, detail=f"{count} unread")
     except Exception:
         pass
 

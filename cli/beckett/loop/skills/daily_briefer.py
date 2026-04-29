@@ -93,13 +93,16 @@ async def get_unread_count(ctx: RunContext[RoleDeps]) -> str:
     timeout = guard_timeout(ctx.deps)
     try:
         proc = subprocess.run(
-            ["gws", "gmail", "+triage"],
+            ["gws", "gmail", "+triage", "--format", "json"],
             capture_output=True, text=True, timeout=timeout, env=env,
         )
-        if proc.returncode == 0 and proc.stdout.strip():
-            lines = len([ln for ln in proc.stdout.splitlines() if ln.strip()])
-            count = max(0, lines - 1)
-            return str(count)
+        if proc.returncode == 0:
+            raw = "\n".join(
+                ln for ln in proc.stdout.splitlines() if not ln.startswith("Using")
+            ).strip()
+            if raw:
+                messages = json.loads(raw)
+                return str(len(messages))
         return "0"
     except Exception:
         return "unknown"
