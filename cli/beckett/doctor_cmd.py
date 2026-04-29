@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +23,27 @@ def _collect_role_dirs(explicit: tuple[str, ...]) -> list[Path]:
     if explicit:
         return [resolve_role_dir(t) for t in explicit]
     return list(iter_role_dirs(resolve_base_path()))
+
+
+def _check_openshell(policy_path: str) -> tuple[bool, str]:
+    """Verify openshell binary is on PATH and the container runtime is reachable."""
+    if not shutil.which("openshell"):
+        return False, "openshell binary not found on PATH (install from https://github.com/NVIDIA/OpenShell)"
+    if not Path(policy_path).is_file():
+        return False, f"BECKETT_OPENSHELL_POLICY file not found: {policy_path}"
+    # Quick liveness check: openshell status exits 0 when daemon is running
+    try:
+        result = subprocess.run(
+            ["openshell", "status"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if result.returncode != 0:
+            return False, "openshell daemon not reachable (is Docker/Podman running?)"
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False, "openshell status check timed out or failed"
+    return True, f"openshell ready, policy={policy_path}"
 
 
 def _has_model_env() -> bool:
@@ -69,6 +92,11 @@ def doctor_cmd(json_out: bool = False, role_targets: tuple[str, ...] = ()) -> No
     ok3 = _has_model_env()
     msg3 = "model env configured" if ok3 else "missing model env (set BECKETT_MODEL and/or provider API key)"
     add("model_env", ok3, msg3, status=("pass" if ok3 else "warn"))
+
+    policy = os.environ.get("BECKETT_OPENSHELL_POLICY", "").strip()
+    if policy:
+        shell_ok, shell_msg = _check_openshell(policy)
+        add("openshell", shell_ok, shell_msg, status=("pass" if shell_ok else "warn"))
 
     blocking_ok = all(c["status"] != "fail" for c in checks)
 

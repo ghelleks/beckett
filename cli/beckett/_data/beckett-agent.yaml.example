@@ -1,0 +1,62 @@
+# Beckett OpenShell sandbox policy template.
+#
+# Copy this file and substitute {role_dir} with the absolute path to your role
+# directory before use:
+#
+#   export ROLE_DIR=/path/to/your/role
+#   envsubst < beckett-agent.yaml.example > beckett-agent.yaml
+#   BECKETT_OPENSHELL_POLICY=/path/to/beckett-agent.yaml beckett loop --role-target $ROLE_DIR
+#
+# Container runtime requirement:
+#   - Docker Engine 28.04+ (official), or
+#   - Podman: set CONTAINER_HOST to the Podman socket path, or on macOS let
+#     OpenShell auto-detect via `podman machine inspect`.
+#
+# Reference: https://docs.nvidia.com/openshell/latest/sandboxes/policies.html
+
+version: 1
+
+filesystem_policy:
+  read_only:
+    # Full role directory is readable so the LLM subprocess can access the
+    # prompt stack (ROLE.md, CONTEXT.md, Memory/INDEX.md, etc.)
+    - path: "{role_dir}"
+  read_write:
+    # Agent may write observations and state files to these subdirectories only.
+    - path: "{role_dir}/Memory"
+    - path: "{role_dir}/.ooda-state"
+    - path: "{role_dir}/.ooda-pending"
+
+network_policies:
+  allow_inference:
+    # claude --print connects to the Anthropic API.
+    binaries: ["claude"]
+    destinations:
+      - host: "api.anthropic.com"
+        port: 443
+      # Anthropic API may also resolve through these CDN addresses:
+      - host: "claude.ai"
+        port: 443
+
+  allow_google_apis:
+    # gws CLI calls Google Workspace APIs.
+    binaries: ["gws"]
+    destinations:
+      - host: "*.googleapis.com"
+        port: 443
+      - host: "accounts.google.com"
+        port: 443
+
+  allow_todoist:
+    # td CLI calls the Todoist API.
+    binaries: ["td"]
+    destinations:
+      - host: "api.todoist.com"
+        port: 443
+
+  # Uncomment to allow the agent to reach additional endpoints:
+  # allow_custom:
+  #   binaries: ["curl", "python3"]
+  #   destinations:
+  #     - host: "example.com"
+  #       port: 443

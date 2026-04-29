@@ -2,7 +2,14 @@
 
 **Context:** See `docs/design.md` for full system design. This spec covers the weekly cross-Role synthesis pass — the one agent that deliberately exercises the global-read rule by reading Memory/ files across all Roles, identifying cross-role patterns, and writing synthesis observations to `personal/Memory/Synthesis/`. Its output is the raw material that `masks reflect` reads when building SELF.md proposals.
 
-**Deliverables:** `skills/ooda-orient-synthesis/SKILL.md` plus loop runtime guard/agent implementation. Listed as an `orient` entry in the personal role `LoopSpec`.
+**Implementation:** `cli/beckett/loop/skills/orient_synthesis.py`. Listed as a `mask-ooda-orient-synthesis` entry in the personal role `LoopSpec`.
+
+**Architecture:** The skill uses the Beckett three-tier agent model:
+- **Guard (`orient_synthesis_guard`):** Pure Python predicate — `GuardFn` returning `GuardOutcome`. Checks day-of-week and cooldown log. No subprocess calls.
+- **Agent (`orient_synthesis_agent`):** `pydantic_ai.Agent` with `@tool` functions for memory reads and writes. The LLM reasons over tool outputs to identify patterns and draft synthesis entries. Rule 7 housekeeping (`.synthesis.log` update) happens in the Python agent function after `agent.run()` returns, not inside the LLM call.
+- **Output model:** `SynthesisResult(patterns_found: int, written: int, stale_updated: int)`.
+
+**Deliverables:** Loop runtime guard/agent implementation in `cli/beckett/loop/skills/orient_synthesis.py`. The agent-skills `mask-ooda-orient-synthesis/SKILL.md` remains the independently-invocable Claude Code skill; Beckett does not reimplement it (per Rule 6).
 
 ---
 
@@ -46,7 +53,7 @@
 How the skill sits in the pipeline: guard function → synthesis agent → masks reflect → PR. What "cross-role pattern" means operationally and how it differs from a role-specific observation.
 
 ### 2. Guard function
-The exact guard logic for `mask-ooda-orient-synthesis`: day-of-week check, already-ran-this-week check, how `SYNTHESIS_DAY` is read from the environment.
+The guard is implemented as `orient_synthesis_guard(deps: RoleDeps) -> GuardOutcome` — a pure Python async function. `SYNTHESIS_DAY` is read from `deps.env.get("SYNTHESIS_DAY", "0")` (not from `os.environ` directly, so role-local `.env` takes precedence). The already-ran check reads `deps.personal_dir / ".synthesis.log"` and parses `SYNTHESIS <ISO-timestamp>` lines; if any timestamp is within the past 7 days, the guard returns `triggered=False`. The guard never invokes any subprocess.
 
 ### 3. Memory scan
 Which directories are scanned and in what order. How the skill determines which Role directories exist under `$BASE`. How session dates are inferred from Memory file content or git history.
@@ -57,11 +64,15 @@ The algorithm for clustering observations into patterns. How the ≥3-session / 
 ### 5. Synthesis file writes
 The exact format of each `personal/Memory/Synthesis/<name>.md` file. How existing files are identified and updated vs. new files created. How naming conflicts are handled.
 
+The agent calls `write_synthesis(subpath, content)` — a `@tool` that wraps `write_memory(deps, subpath, content, allow_personal_synthesis=True)`. The Python layer enforces: (a) `subpath` must start with `"Synthesis/"`, (b) `allow_personal_synthesis=True` is required, (c) the target must resolve within `personal/Memory/Synthesis/`. Any attempt to write outside this path raises `MemoryWriteError` and is rejected before any file is created.
+
 ### 6. Stale pattern handling
 The 90-day staleness rule. How the skill marks stale patterns and what it writes to the run summary about them.
 
 ### 7. Log format
 The exact line format written to `personal/.synthesis.log`. What "N patterns found, M updated" means operationally.
+
+**Rule 7 housekeeping note:** the `.synthesis.log` write is performed by the Python `orient_synthesis_agent` function **after** `agent.run()` returns — it is not part of the LLM call. This ensures the log is always written even if the LLM produces no synthesis files, and that the log format is controlled deterministically by Python. The LLM is responsible for deciding *what* to write; Python is responsible for recording *that* the run happened.
 
 ### 8. Self-check table
 See Static Evaluation Metrics.
@@ -72,15 +83,15 @@ See Static Evaluation Metrics.
 
 | ID   | Name                  | Pass condition                                                                                              |
 |------|-----------------------|-------------------------------------------------------------------------------------------------------------|
-| M-01 | Personal root only    | Skill logs a warning and exits without reading or writing if `$PWD` is not the `personal/` Role directory   |
-| M-02 | Day-of-week guard     | Guard returns `triggered=false` on any day other than the configured `SYNTHESIS_DAY`; no synthesis agent is invoked |
-| M-03 | Already-ran guard     | Guard returns `triggered=false` if `personal/.synthesis.log` contains an entry dated within the past 7 days |
-| M-04 | All Roles scanned     | Memory/ is read from every Role directory under `$BASE`; no Role is skipped                                 |
+| M-01 | Personal role only    | `orient_synthesis_agent` checks `deps.role == "personal"`; returns `detail: "requires personal role"` without reading or writing if running in any other role |
+| M-02 | Day-of-week guard     | `orient_synthesis_guard` returns `triggered=False` on any day other than `SYNTHESIS_DAY` (read from `deps.env`); no synthesis agent is invoked |
+| M-03 | Already-ran guard     | `orient_synthesis_guard` parses `deps.personal_dir / ".synthesis.log"` and returns `triggered=False` if any `SYNTHESIS <timestamp>` line is dated within the past 7 days |
+| M-04 | All Roles scanned     | `list_role_memory_files` @tool enumerates Role directories via `deps.masks_base`; no Role is skipped        |
 | M-05 | Evidence threshold    | No pattern file is written with fewer than 3 sessions or fewer than 2 Roles of evidence                    |
 | M-06 | Cross-role filter     | No pattern observed only in a single Role is written to `personal/Memory/Synthesis/`                        |
-| M-07 | Synthesis file format | Every written file contains: pattern name heading, First/Last observed dates, `## Pattern`, `## Evidence`   |
-| M-08 | In-place update       | Re-running synthesis on an existing pattern updates the file rather than creating a duplicate               |
-| M-09 | INDEX.md updated      | `personal/Memory/INDEX.md` reflects any new or modified synthesis files after each run                     |
-| M-10 | Log written           | `personal/.synthesis.log` gains one new line on every completed run, with timestamp and pattern counts      |
-| M-11 | No git operations     | Skill does not call `git add`, `git commit`, `git push`, or any branch operation                            |
-| M-12 | Stale marked          | Patterns with no evidence in the past 90 days are marked `Status: stale` in their file, not deleted        |
+| M-07 | Synthesis file format | Every file written by `write_synthesis` contains: pattern name heading, First/Last observed dates, `## Pattern`, `## Evidence` |
+| M-08 | In-place update       | Re-running synthesis on an existing pattern calls `write_synthesis` on the existing path, updating rather than creating a duplicate |
+| M-09 | INDEX.md updated      | `write_memory` (called by `write_synthesis`) creates or preserves `personal/Memory/INDEX.md` for any new or modified synthesis files |
+| M-10 | Log written           | `orient_synthesis_agent` appends one `SYNTHESIS <ISO-timestamp> — N patterns found, M updated` line to `personal/.synthesis.log` after every completed `agent.run()` (Rule 7 housekeeping) |
+| M-11 | No git operations     | `orient_synthesis.py` contains no `git add`, `git commit`, `git push`, or branch operation calls; git is handled by `commit_role_changes` in the runner |
+| M-12 | Stale marked          | Patterns with no evidence in the past 90 days are marked `**Status:** stale` by the LLM via `write_synthesis`; files are not deleted |

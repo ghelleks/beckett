@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import json
+
 import typer
 
 from beckett import __version__
 from beckett.doctor_cmd import doctor_cmd
-from beckett.loop.runner import run_loop_daemon, run_loop_once
+from beckett.loop.runner import (
+    LoopRunResult,
+    SkillRunResult,
+    run_loop_daemon,
+    run_loop_dryrun,
+    run_loop_once,
+    run_single_skill,
+)
 from beckett.roles_cmd import roles_cmd
 from beckett.status_cmd import status_cmd
 
@@ -64,10 +73,50 @@ def status(
         default=None,
         help="Optional Role paths or names (default: scan MASKS_BASE)",
     ),
+    verbose: bool = typer.Option(
+        False,
+        "--verbose",
+        "-v",
+        help="Show full per-phase and per-skill breakdown from last-run.json.",
+    ),
 ) -> None:
     """Show latest loop run summary per role."""
     rt: tuple[str, ...] = tuple(role_targets) if role_targets else ()
-    status_cmd(role_targets=rt)
+    status_cmd(role_targets=rt, verbose=verbose)
+
+
+def _print_dryrun(result: LoopRunResult) -> None:
+    """Format a dry-run result as a guard trigger table."""
+    typer.echo(f"[DRY RUN] role={result.role}  {result.started_at}")
+    for phase in result.phases:
+        typer.echo(f"\nPhase: {phase.phase}")
+        if not phase.skills:
+            typer.echo("  (no entries)")
+            continue
+        for sk in phase.skills:
+            icon = "▶" if sk.guard.triggered else "·"
+            state = "TRIGGER" if sk.guard.triggered else ("SKIP   " if not sk.skipped else "SKIP(X)")
+            typer.echo(f"  {icon} {sk.id:<32} {state}  {sk.guard.detail!r}")
+    typer.echo(
+        f"\nSummary: {result.triggered_count} would trigger / {result.total_entries} total"
+    )
+
+
+def _print_skill_result(skill_id: str, sk: SkillRunResult, committed: bool) -> None:
+    """Format a single-skill run result."""
+    icon = "▶" if sk.guard.triggered else "·"
+    typer.echo(f"Skill: {skill_id}")
+    typer.echo(f"Guard:  {icon} {'TRIGGER' if sk.guard.triggered else 'SKIP'}  {sk.guard.detail!r}")
+    if sk.skipped:
+        typer.echo("Agent:  SKIPPED (not in registry)")
+    elif not sk.guard.triggered:
+        typer.echo("Agent:  not run (guard did not trigger)")
+    elif sk.error:
+        typer.secho(f"Agent:  ERROR — {sk.error}", fg=typer.colors.RED, err=True)
+    else:
+        result_str = json.dumps(sk.agent_result, indent=2) if sk.agent_result else "{}"
+        typer.echo(f"Agent:  OK\n{result_str}")
+    typer.echo(f"Committed: {'yes' if committed else 'no'}")
 
 
 @app.command("loop")
@@ -78,6 +127,21 @@ def loop(
         help="Optional role path or name. Omit to run all roles under MASKS_BASE.",
     ),
     once: bool = typer.Option(False, "--once", help="Run one cycle and exit."),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Evaluate guards only — print what would trigger without running agents.",
+    ),
+    skill: str | None = typer.Option(
+        None,
+        "--skill",
+        help="Run a single skill by entry ID (implies --once). Requires --role-target.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="With --skill: run the agent even if the guard does not trigger.",
+    ),
     interval: str = typer.Option("15m", "--interval", help="Loop interval (e.g. 5m, 30s, 1h)."),
     spec: str | None = typer.Option(
         None,
@@ -85,7 +149,50 @@ def loop(
         help="Optional LoopSpec path (yaml/json/python). Requires --role-target.",
     ),
 ) -> None:
-    """Run the Beckett loop daemon or a single cycle."""
+    """Run the Beckett loop daemon, a single cycle, or a single skill.
+
+    Examples:
+
+      beckett loop --once --role-target work
+
+      beckett loop --dry-run --role-target work
+
+      beckett loop --skill ooda-observe --role-target work
+
+      beckett loop --skill ooda-observe --role-target work --force
+    """
+    from beckett.loop.deps import build_role_deps
+    from beckett.loop.spec import LoopConfigError
+
+    if skill:
+        if not role_target:
+            typer.secho("--skill requires --role-target", err=True, fg=typer.colors.RED)
+            raise typer.Exit(2)
+        try:
+            deps = build_role_deps(role_target, explicit_spec=spec)
+            sk, committed = run_single_skill(deps, skill, force_trigger=force)
+            _print_skill_result(skill, sk, committed)
+        except LoopConfigError as exc:
+            typer.secho(str(exc), err=True, fg=typer.colors.RED)
+            raise typer.Exit(1) from exc
+        return
+
+    if dry_run:
+        from pathlib import Path
+        targets = [role_target] if role_target else None
+        if targets is None:
+            from beckett.paths import resolve_base_path
+            from beckett.roles import iter_role_dirs
+            targets = [str(p) for p in iter_role_dirs(resolve_base_path())]
+        for target in targets:
+            try:
+                deps = build_role_deps(target, explicit_spec=spec)
+                result = run_loop_dryrun(deps)
+                _print_dryrun(result)
+            except LoopConfigError as exc:
+                typer.secho(f"[FAIL] {Path(target).name}: {exc}", err=True, fg=typer.colors.RED)
+        return
+
     if once:
         run_loop_once(role_target=role_target, spec_path=spec)
         return

@@ -1,7 +1,7 @@
 # SDD Scenarios: `ooda-orient-synthesis` Skill
 
 **Companion spec:** `docs/specs/ooda-orient-synthesis/SPEC.md`  
-**Date:** 2026-04-23
+**Date:** 2026-04-29
 
 ---
 
@@ -103,15 +103,17 @@ Metric cross-references: M-12
 
 ---
 
-### 8. Skill invoked directly — not from OODA loop
+### 8. Skill invoked directly via --skill --force
 
-A user types "run synthesis" in a `personal/` session. The guard is not in play (direct invocation bypasses the guard). The skill runs immediately.
+`beckett loop --skill mask-ooda-orient-synthesis --role-target personal --force` is run on a Wednesday (not the synthesis day). The guard would normally block (wrong day), but `--force` bypasses it.
 
 Questions the proposal must answer:
-- Does the skill verify it is running from the `personal/` workspace root and proceed normally?
-- Does it present a summary of what it found before writing — giving the user visibility before files are committed?
-- Does it still write to `personal/Memory/Synthesis/` and update the log, producing the same output as an OODA-triggered run?
-- If the user invokes it from a `work/` session, does it warn and exit rather than writing to the wrong location?
+- Does `orient_synthesis_agent` check `deps.role == "personal"` and proceed normally when role is `personal`?
+- If `--force` is used from a `work` role (`--role-target work`), does the agent return `detail: "requires personal role"` without writing any files?
+- Does the agent still write to `personal/Memory/Synthesis/` and update `.synthesis.log` (Rule 7 housekeeping), producing the same output as a guard-triggered run?
+- Does `last-run.json` show `triggered: true` (forced) and a populated `agent_result` with `SynthesisResult` fields?
+
+Implementation note: the role check is `deps.role != "personal"`, not a workspace-root filesystem check. The role name is set by the runner from the role directory name, so `--role-target personal` sets `deps.role = "personal"`.
 
 Metric cross-references: M-01, M-07, M-09, M-10, M-11
 
@@ -148,16 +150,16 @@ Each invocation of the synthesis skill (whether it finds patterns or not) append
 Pass: after three weekly runs, the log has three entries; a run that writes no log entry fails this test.
 
 **T8 Skill writes no git operations.**  
-The skill source contains no `git add`, `git commit`, `git push`, or branch operation calls. The session-end hook handles committing synthesis file changes.  
-Pass: `grep -r "git commit\|git push\|git add" skills/ooda-orient-synthesis/` returns no results.
+The skill source contains no `git add`, `git commit`, `git push`, or branch operation calls. The runner's `commit_role_changes` in `cli/beckett/loop/runner.py` handles committing synthesis file changes at the end of the cycle.  
+Pass: `grep -n "git commit\|git push\|git add" cli/beckett/loop/skills/orient_synthesis.py` returns no results.
 
 **T9 Stale patterns are marked, not deleted.**  
 A synthesis file whose most recent evidence entry is more than 90 days old is updated to include `**Status:** stale` — the file and its evidence history are otherwise preserved.  
 Pass: after a synthesis run, stale files are present in `personal/Memory/Synthesis/` with the stale marker; no synthesis file is deleted by the skill.
 
-**T10 Direct invocation from wrong workspace root exits with a warning.**  
-If the skill is invoked from a non-personal workspace root (e.g., from `work/`), it logs a warning and exits without reading any Memory files or writing any synthesis files.  
-Pass: invoking the skill from `~/Desktop/work/` produces a warning and zero file changes; `personal/Memory/Synthesis/` is unchanged.
+**T10 Invocation from non-personal role returns without writing.**  
+If `orient_synthesis_agent` is invoked with `deps.role != "personal"` (e.g., role is `work`), it returns immediately with `detail: "requires personal role"` without reading any Memory files or writing any synthesis files.  
+Pass: `beckett loop --skill mask-ooda-orient-synthesis --role-target work --force` completes with exit code `0`, `agent_result.detail == "requires personal role"`, and `personal/Memory/Synthesis/` is unchanged.
 
 ---
 

@@ -7,9 +7,9 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from beckett.env_util import merge_env_for_role
+from beckett.loop.spec import LoopSpec, load_loop_spec
 from beckett.paths import resolve_base_path
 from beckett.role_path import resolve_role_dir
-from beckett.loop.spec import LoopSpec, load_loop_spec
 
 
 class RoleDeps(BaseModel):

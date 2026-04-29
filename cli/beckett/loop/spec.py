@@ -50,7 +50,7 @@ def _load_py_spec(path: Path) -> LoopSpec:
     spec.loader.exec_module(module)
     if not hasattr(module, "LOOP_SPEC"):
         raise LoopConfigError(f"python LoopSpec file missing LOOP_SPEC: {path}")
-    value = getattr(module, "LOOP_SPEC")
+    value = module.LOOP_SPEC
     if isinstance(value, LoopSpec):
         return value
     if isinstance(value, dict):

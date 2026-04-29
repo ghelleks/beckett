@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.4"]
 
 [project.scripts]
 beckett = "beckett.cli:app"
@@ -20,6 +20,25 @@ beckett = "beckett.cli:app"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = [
+    "E501",  # line-length — enforced by formatter, not linter
+    "B008",  # function call in default args (Typer pattern)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["F401", "F811"]  # re-imports and redefinitions are common in test fixtures
+
+[tool.pytest.ini_options]
+markers = [
+    "live: requires BECKETT_MODEL and real API credentials (skipped by default)",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["beckett"]
