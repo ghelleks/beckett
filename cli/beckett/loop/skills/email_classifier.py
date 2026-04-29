@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import re
 import subprocess
+from pathlib import Path
 
 from pydantic import BaseModel
 from pydantic_ai import Agent, RunContext
@@ -130,6 +133,29 @@ async def email_classifier_guard(deps: RoleDeps) -> GuardOutcome:
 # ── Agent ─────────────────────────────────────────────────────────────────────
 
 
+def _fetch_emails(deps: RoleDeps) -> list[dict]:
+    """Fetch unread emails. Returns empty list quickly when no GWS config present."""
+    env = gws_env(deps)
+    config_dir = env.get("GOOGLE_WORKSPACE_CLI_CONFIG_DIR", "")
+    if not config_dir or not Path(config_dir).is_dir():
+        return []
+    try:
+        proc = subprocess.run(
+            ["gws", "gmail", "+triage", "--format", "json"],
+            capture_output=True, text=True, timeout=guard_timeout(deps), env=env,
+        )
+        if proc.returncode == 0:
+            raw = "\n".join(
+                ln for ln in proc.stdout.splitlines() if not ln.startswith("Using")
+            ).strip()
+            if raw:
+                parsed = json.loads(raw)
+                return parsed if isinstance(parsed, list) else []
+    except Exception:
+        pass
+    return []
+
+
 async def email_classifier_agent(
     deps: RoleDeps, guard: GuardOutcome, context: dict | None = None
 ) -> dict:
@@ -137,11 +163,71 @@ async def email_classifier_agent(
     if context and context.get("_phase_triggers"):
         phase_context = f"\nPhase trigger context: {context['_phase_triggers']}"
 
-    prompt = (
-        f"Role: {deps.role}\n"
-        f"Signal: {guard.detail}{phase_context}\n\n"
-        "Classify unread inbox emails and apply the appropriate email-agent labels."
-    )
-
     fallback: dict = {"classified": 0, "skipped": 0, "labels_applied": []}
-    return await run_agent(_email_agent, prompt, deps, fallback_result=fallback)
+    model = deps.env.get("BECKETT_MODEL", "").strip()
+    llm_cmd = (deps.env.get("BECKETT_LLM_CMD") or deps.env.get("MASKS_LLM_CMD") or "").strip()
+
+    if model:
+        prompt = (
+            f"Role: {deps.role}\n"
+            f"Signal: {guard.detail}{phase_context}\n\n"
+            "Classify unread inbox emails and apply the appropriate email-agent labels."
+        )
+        return await run_agent(_email_agent, prompt, deps, fallback_result=fallback)
+
+    if llm_cmd and guard.triggered:
+        # Pre-fetch emails, ask claude for classification decisions only,
+        # then apply labels from Python.
+        emails = _fetch_emails(deps)
+        if not emails:
+            return fallback
+
+        email_lines = "\n".join(
+            f"  id={m.get('id','?')}  from={m.get('from','?')}  subject={m.get('subject','(no subject)')}"
+            for m in emails[:20]
+        )
+        prompt = (
+            f"Role: {deps.role}\n"
+            f"Signal: {guard.detail}{phase_context}\n\n"
+            f"Unread emails:\n{email_lines}\n\n"
+            "Classify each email. Return ONLY a JSON array, no prose:\n"
+            '[{"id":"<msg_id>","label":"<one of: reply_needed|review|todo|summarize>","skip":false}]\n'
+            "Set skip:true for automated noise/spam. Do not call any tools."
+        )
+
+        from beckett.loop.claude import invoke_claude
+
+        try:
+            output = invoke_claude(deps, prompt)
+            json_match = re.search(r"\[.*\]", output, re.DOTALL)
+            if not json_match:
+                return fallback
+            decisions = json.loads(json_match.group())
+        except Exception:
+            return fallback
+
+        # Apply labels via Python tools
+        env = gws_env(deps)
+        timeout = guard_timeout(deps)
+        classified, labels_applied = 0, []
+        for decision in decisions:
+            msg_id = decision.get("id", "")
+            label = decision.get("label", "")
+            if decision.get("skip") or label not in VALID_EMAIL_LABELS or not msg_id:
+                continue
+            try:
+                params = json.dumps({"id": msg_id, "addLabelIds": [label]})
+                proc = subprocess.run(
+                    ["gws", "gmail", "messages", "modify", "--params", params],
+                    capture_output=True, text=True, timeout=timeout, env=env,
+                )
+                if proc.returncode == 0:
+                    classified += 1
+                    labels_applied.append(label)
+            except Exception:
+                pass
+
+        return {"classified": classified, "skipped": len(decisions) - classified,
+                "labels_applied": labels_applied}
+
+    return fallback
