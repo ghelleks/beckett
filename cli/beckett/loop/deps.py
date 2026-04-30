@@ -7,6 +7,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from beckett.env_util import merge_env_for_role
+from beckett.loop.phase_state import PhaseState, load_phase_state
 from beckett.loop.spec import LoopSpec, load_loop_spec
 from beckett.paths import resolve_base_path
 from beckett.role_path import resolve_role_dir
@@ -20,6 +21,7 @@ class RoleDeps(BaseModel):
     db_path: Path | None = None
     env: dict[str, str] = Field(default_factory=dict)
     loop_spec: LoopSpec
+    phase_state: PhaseState = Field(default_factory=PhaseState)
 
 
 def build_role_deps(role_target: str, explicit_spec: str | None = None) -> RoleDeps:
@@ -37,6 +39,7 @@ def build_role_deps(role_target: str, explicit_spec: str | None = None) -> RoleD
         db_path=db_path,
         env=env,
         loop_spec=spec,
+        phase_state=load_phase_state(role_dir),
     )
 
 
@@ -44,7 +47,7 @@ def build_all_role_deps(explicit_spec: str | None = None) -> list[RoleDeps]:
     """Build deps for all roles under MASKS_BASE."""
     from beckett.roles import iter_role_dirs
 
-    out: list[RoleDeps] = []
-    for role_dir in iter_role_dirs(resolve_base_path()):
-        out.append(build_role_deps(str(role_dir), explicit_spec=explicit_spec))
-    return out
+    return [
+        build_role_deps(str(role_dir), explicit_spec=explicit_spec)
+        for role_dir in iter_role_dirs(resolve_base_path())
+    ]

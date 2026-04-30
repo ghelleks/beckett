@@ -46,3 +46,4 @@ packages = ["beckett"]
 [tool.hatch.build.targets.wheel.force-include]
 "beckett/_data/.env.example" = "beckett/_data/.env.example"
 "beckett/_data/templates/OODA.md" = "beckett/_data/templates/OODA.md"
+"beckett/_data/.claude-plugin/plugin.json" = "beckett/_data/.claude-plugin/plugin.json"

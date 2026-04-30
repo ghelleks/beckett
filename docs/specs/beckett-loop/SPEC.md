@@ -1,13 +1,13 @@
 # Beckett Loop Specification
 
 **Implementation:** `cli/beckett/loop/`  
-**Date:** 2026-04-29
+**Date:** 2026-04-30
 
 ---
 
 ## Scope
 
-`beckett loop` is the canonical headless runtime for Pirandello roles. It evaluates guard conditions, invokes Pydantic AI agents, manages memory writes, and commits changes — all without user interaction.
+`beckett loop` is the canonical headless runtime for Pirandello roles. It evaluates guard conditions, invokes Pydantic AI agents or delegated subprocesses, manages memory writes, and commits changes — all without user interaction.
 
 ---
 
@@ -26,17 +26,19 @@
 ```yaml
 observe:
   entries:
-    - id: ooda-observe
-      agent: ooda-observe        # registry key for agent function
-      guard: ooda-observe        # registry key for guard function (defaults to id)
+    - id: beckett-observe
+      agent: beckett-observe        # registry key for agent function
+      guard: beckett-observe        # registry key for guard function (defaults to id)
+    - id: beckett-observe-rss
+      agent: beckett-observe-rss
 orient:
   entries:
-    - id: mask-ooda-orient-synthesis
-      agent: mask-ooda-orient-synthesis
+    - id: beckett-orient-decisions
+      agent: beckett-orient-decisions
 act:
   entries:
-    - id: ooda-act
-      agent: ooda-act
+    - id: beckett-act
+      agent: beckett-act
 active_hours: "07:00-19:00"     # optional daemon-mode gate (HH:MM-HH:MM)
 interval_minutes: 15             # optional daemon interval (default 15)
 ```
@@ -54,13 +56,13 @@ These ten rules determine where any piece of logic belongs. Apply in order — t
 | 3 | Side effects with hard invariants (write only within `role_dir/Memory/`) | Pydantic `@tool` |
 | 4 | Deterministic API calls (count unread, list tasks, read file by path) | Pydantic `@tool` |
 | 5 | Reading unstructured content and making a judgment | Direct LLM or `run_claude_skill` |
-| 6 | Capabilities that exist as Cursor/Claude Code agent-skills | `run_claude_skill` always |
-| 7 | Post-execution side effects (stamps, log updates, `last-run.json`, git) | Pydantic runner |
+| 6 | Capabilities requiring multi-step agentic work with MCP access | `invoke_claude_agent` |
+| 7 | Post-execution side effects (stamps, log updates, `last-run.json`, git, PhaseState persistence) | Pydantic runner |
 | 8 | Cross-phase context propagation | `context: dict` + typed output models |
 | 9 | Error handling and retry | Pydantic AI retry / runner error handling |
 | 10 | "Can a Python function under 15 lines do this correctly?" | If yes: `@tool`; if no: LLM |
 
-**Implementation files:** `cli/beckett/loop/claude.py`, `cli/beckett/loop/skill_agent.py`, `cli/beckett/loop/runner.py`, `cli/beckett/loop/skills/*.py`
+**Implementation files:** `cli/beckett/loop/claude.py`, `cli/beckett/loop/skill_agent.py`, `cli/beckett/loop/runner.py`, `cli/beckett/loop/phase_state.py`, `cli/beckett/loop/skills/*.py`
 
 ---
 
@@ -73,6 +75,7 @@ Each registered skill is composed of a **guard function** and an **agent functio
 Python functions registered on a `pydantic_ai.Agent` using the `@agent.tool` decorator. The model calls these for deterministic data fetches and invariant-enforced writes. They do not invoke any LLM.
 
 Examples:
+
 - `get_unread_emails(account)` — calls `gws gmail triage`
 - `write_memory_file(subpath, content)` — enforces write within `role_dir/Memory/`
 - `complete_todoist_task(task_id)` — calls `td complete` (irreversible; Python must control)
@@ -84,15 +87,25 @@ The `pydantic_ai.Agent` model reasons over tool outputs using `BECKETT_MODEL`. U
 
 When `BECKETT_MODEL` is not set but `BECKETT_LLM_CMD` is configured, agents fall back to calling `invoke_claude` directly with a canned prompt (the subprocess fallback path). When neither is set, the agent logs a warning and returns the `fallback_result`.
 
-### Tier 3 — `run_claude_skill` (Rules 5, 6)
+### Tier 3 — `invoke_claude_agent`
 
-A shared `@tool` on every agent that calls `invoke_claude(deps, prompt)`. Use for multi-step agentic work requiring MCP tool access — executing a task instruction, delivering a briefing. Skills in `agent-skills/` remain independently invocable and are not reimplemented in Beckett.
+For phases requiring **multi-step agentic work with MCP tool access**, the runner calls the Claude CLI in agent mode rather than piping a single prompt through `invoke_claude`.
+
+- **Argv shape:**  
+  `claude -p --agent <name> --plugin-dir <beckett_data_dir> --permission-mode auto --output-format json --max-budget-usd <budget>`
+- **`cwd`:** `deps.role_dir` (role workspace root — all relative paths resolve as the role intends).
+- **`beckett_data_dir`:** Resolved at import time via  
+  `importlib.resources.files("beckett").joinpath("_data")`  
+  so bundled agents and skills ship with the package.
+- **`--plugin-dir`:** Makes all bundled agents and skills discoverable **without copying** artifacts into `~/.claude/`.
+
+Pydantic-layer agents may still expose a **`run_claude_skill`** `@tool` that delegates to the Tier-2 **`invoke_claude`** stdin prompt stack where MCP breadth is unnecessary; **`invoke_claude_agent`** applies when Rule 6 multi-step MCP work is required.
 
 ---
 
 ## LLM Invocation Chain
 
-`invoke_claude(deps, skill_prompt)` in `cli/beckett/loop/claude.py`:
+`invoke_claude(deps, skill_prompt)` in `cli/beckett/loop/claude.py` (Tier-2 / `run_claude_skill` path):
 
 1. **Builds the Pirandello prompt stack** by reading optional files in `hooks/start.sh` section order:
    - `=== GLOBAL AGENTS ===` — `<masks_base>/AGENTS.md`
@@ -134,17 +147,27 @@ If a guard or agent ID from the `LoopSpec` is not found in the Python registry, 
 
 ## Skill Contracts
 
-Each built-in skill has a typed Pydantic output model. The model is returned from `agent.run()` and stored in `SkillRunResult.agent_result`.
+Each built-in Beckett phase has a typed Pydantic output model. The model is returned from `agent.run()` / subprocess handling and stored in `SkillRunResult.agent_result`.
 
-| Skill ID | Agent | Guard trigger condition | Output model |
+| Skill ID | Guard trigger condition | Agent type | Output model |
 |---|---|---|---|
-| `ooda-observe` | `observe_agent` | Unread email OR `.ooda-pending/observer.txt` present | `ObserveResult(signals_found, files_written, sources)` |
-| `email-classifier` | `email_classifier_agent` | Unread email | `EmailClassificationResult(classified, skipped, labels_applied)` |
-| `daily-briefer` | `daily_briefer_agent` | Within ±15m of `DAILY_BRIEFER_TARGET` (default `06:45`) AND not run today | `BriefingResult(delivered, sections)` |
-| `ooda-act` | `act_agent` | Active `@agent` or qualifying `@decision` tasks in Todoist | `ActResult(executed, failed, task_ids)` |
-| `mask-ooda-orient-synthesis` | `orient_synthesis_agent` | Day-of-week == `SYNTHESIS_DAY` AND 7-day cooldown elapsed | `SynthesisResult(patterns_found, written, stale_updated)` |
+| `beckett-observe` | Unread email OR `.beckett-pending/observer.txt` present OR 90m elapsed since `last_observe` | Pydantic AI | `ObserveResult(signals_found, files_written, sources)` |
+| `beckett-observe-rss` | r2e configured + 90m elapsed since `last_observe_rss` | Shell subprocess | `RssResult(feeds_polled, items_found)` |
+| `beckett-observe-context-refresh` | 72h elapsed since `last_observe_context_refresh` | `invoke_claude_agent` | `ContextRefreshResult(files_reviewed, updated)` |
+| `beckett-orient-decisions` | 30m elapsed since `last_orient_decisions` + new observation batch since last run | `invoke_claude_agent` | `DecisionsResult(decisions_synthesized, written)` |
+| `beckett-orient-email` | 15m elapsed since `last_orient_email` + inbox-guard passes on ≥1 account | `invoke_claude_agent` per account (parallel) | `EmailOrientResult(accounts_processed, classified)` |
+| `beckett-orient-hygiene` | 20m elapsed since `last_orient_hygiene` + `reply_needed` label exists in inbox | `invoke_claude_agent` | `HygieneResult(threads_reviewed, actions_taken)` |
+| `beckett-orient-reply-drafter` | 15m elapsed since `last_orient_reply_drafter` + orient-email ran + `reply_needed` without draft | `invoke_claude_agent` | `ReplyDraftResult(drafts_created)` |
+| `beckett-orient-todo-forwarder` | 15m elapsed since `last_orient_todo_forwarder` + unforwarded `todo` emails exist | Pure Python | `TodoForwardResult(forwarded, failed)` |
+| `beckett-orient-meeting-prep` | 30m elapsed since `last_orient_meeting_prep` + qualifying upcoming meetings | `invoke_claude_agent` per meeting (parallel) | `MeetingPrepResult(meetings_prepped)` |
+| `beckett-orient-post-meeting` | 30m elapsed since `last_orient_post_meeting` + meetings ended in past 90m + event-ID dedup | `invoke_claude_agent` | `PostMeetingResult(meetings_processed, tasks_created)` |
+| `beckett-act` | Active `@agent`-labeled OR qualifying `@decision` Todoist tasks | Pydantic AI | `ActResult(executed, failed, task_ids)` |
+| `beckett-scheduled-staff-update-draft` | Friday + 7d elapsed since `last_scheduled_staff_update` | `invoke_claude_agent` | `ScheduledResult(completed)` |
+| `beckett-scheduled-efficiency-log` | Weekday + 24h elapsed since `last_scheduled_efficiency_log` | Shell | `ScheduledResult(completed)` |
+| `beckett-scheduled-efficiency-email` | Weekday + 24h elapsed since `last_scheduled_efficiency_email` + log written today | Shell | `ScheduledResult(completed)` |
+| `beckett-scheduled-desktop-archive` | 24h elapsed since `last_scheduled_desktop_archive` | `invoke_claude_agent` | `ScheduledResult(completed)` |
 
-**Shared tools** registered on every agent: `run_claude_skill`, `write_memory_file`, `read_memory_file`, `search_memory`.
+**Shared tools** registered on Pydantic agents where applicable: `run_claude_skill`, `write_memory_file`, `read_memory_file`, `search_memory`.
 
 ---
 
@@ -179,15 +202,32 @@ openshell run --policy <path> -- <llm_cmd> ...
 For each cycle:
 
 1. Resolve role directories (explicit `--role-target` or `MASKS_BASE` discovery).
-2. For each role: load `LoopSpec`, build `RoleDeps` (merges env from `os.environ → parent/.env → role/.env`).
+2. For each role: load `LoopSpec`, build `RoleDeps` (merges env from `os.environ → parent/.env → role/.env`), load **`PhaseState`** from disk into `deps.phase_state` (see **PhaseState** below).
 3. Validate registry (lenient — warns and skips unresolved entries).
 4. Check `active_hours` gate (daemon mode only).
 5. For each phase (`observe → orient → act`):
    - Pass 1: evaluate all guards → `trigger_map`
    - Pass 2: for each triggered entry, run agent with `context` containing `_phase_triggers`
-6. Write `<role>/.ooda-state/last-run.json`.
-7. Stage and commit role changes.
-8. Continue to next role on error (roles are independent).
+6. After each triggered agent completes: persist **`PhaseState`** (updated timestamps / dedup sets) to `<role_dir>/.beckett-state/phase-state.json`.
+7. Write `<role>/.beckett-state/last-run.json`.
+8. Stage and commit role changes.
+9. Continue to next role on error (roles are independent).
+
+### PhaseState
+
+- **`PhaseState`** Pydantic model lives in **`cli/beckett/loop/phase_state.py`**.
+- **Fields (`Optional[datetime]` unless noted):** last-run timestamps for each phase —
+  `last_observe`, `last_observe_rss`, `last_observe_context_refresh`,
+  `last_orient_decisions`, `last_orient_email`, `last_orient_hygiene`,
+  `last_orient_reply_drafter`, `last_orient_todo_forwarder`, `last_orient_meeting_prep`,
+  `last_orient_post_meeting`, `last_act`,
+  `last_scheduled_staff_update`, `last_scheduled_efficiency_log`,
+  `last_scheduled_efficiency_email`, `last_scheduled_desktop_archive`.
+
+  Additional PhaseState payloads (e.g. event-ID dedup sets for meeting prep/post-meeting) are implementation-defined extensions of the same file.
+- **Persistence path:** `<role_dir>/.beckett-state/phase-state.json`.
+- **Load site:** `build_role_deps` reads PhaseState during dependency construction.
+- **Storage site:** Runner exposes `deps.phase_state`; guards read interval eligibility from these timestamps (**Guard Contract**, below).
 
 ---
 
@@ -218,7 +258,7 @@ Options:
   --spec TEXT          LoopSpec path override. Requires --role-target.
 ```
 
-**`--dry-run`:** evaluates all guards and prints a trigger table. No agents are invoked, no files written, no git commit. Useful for verifying guard logic without spending tokens.
+**`--dry-run`:** evaluates all guards and prints a trigger table. No agents are invoked, no files written (including PhaseState updates), no git commit. Useful for verifying guard logic without spending tokens.
 
 **`--skill <id>`:** runs a single skill's guard+agent cycle. With `--force`, the agent runs regardless of guard outcome. Prints guard result, agent result dict, and committed status.
 
@@ -246,6 +286,34 @@ With `--verbose`: full per-phase, per-skill detail including guard outcome, `▶
 
 ---
 
+## Naming Convention
+
+All Beckett-owned artifacts use the **`beckett-` prefix** without exception: phase IDs, agent `.md` definitions, bundled skill directories, and dotfile state directories (`<role_dir>/.beckett-state/`, `.beckett-pending/`). Third-party tools, Claude defaults under `~/.claude/`, and non-Beckett plugins are unaffected.
+
+---
+
+## Guard Contract
+
+- Guards rely on **interval-based cooldowns** recorded in **`PhaseState`** timestamps only — no built-in operational-hours predicates inside guard functions themselves.
+- If working-hours restriction is desired, **`active_hours` in `loop.yaml`** is the single supported gate before cycles run (`Execution Model`, step 4). This deliberately **deviates** from legacy `agent-skills` conventions that folded business-hour logic into guards.
+
+---
+
+## Architectural Decisions
+
+Recorded design choices for the Beckett loop surface:
+
+| Decision | Rationale |
+|---|---|
+| **Per-role `PhaseState`** (stored under `<role_dir>/.beckett-state/`, not global dotfiles in `$HOME`) | Keeps telemetry and cooldowns co-located with the role workspace and avoids cross-role coupling. |
+| **`cwd = role_dir` for Claude agent invocation** | Relative paths (`Memory/`, `CONTEXT.md`) and subprocess tools resolve consistently per Pirandello role layout. |
+| **`--plugin-dir` points at bundled `beckett/_data`** | Ships agents/skills with the package; eliminates a separate install step into `~/.claude/agents/` or `~/.claude/skills/`. |
+| **`beckett-` prefix universal** | Unambiguous identities in CLI, YAML, telemetry, and agent skill discovery. |
+| **Parallel dispatch via `ThreadPoolExecutor`** in agent functions **only** (e.g., per-account email orient, per-meeting prep) | Parallelism scoped to deterministic fan-out orchestration layers; avoids nested concurrent runner complexity. |
+| **LLM vs pure-Python splits** | Deterministic transports (RFC 822 forward, Gmail label predicates) remain **pure Python without LLM** for idempotence and auditability (`beckett-orient-todo-forwarder`); MCP-heavy workflows use **`invoke_claude_agent`**. |
+
+---
+
 ## Environment Variables
 
 | Variable | Effect | Default |
@@ -260,6 +328,7 @@ With `--verbose`: full per-phase, per-skill detail including guard outcome, `▶
 | `MASKS_GUARD_TIMEOUT` | Fallback guard timeout | `5` |
 | `BECKETT_OPENSHELL_POLICY` | Path to OpenShell policy YAML; enables sandboxing | unset |
 | `BECKETT_LOOP_INTERVAL` | Daemon interval override | value of `--interval` |
+| `BECKETT_AGENT_BUDGET_USD` | Max USD per `invoke_claude_agent` subprocess (`--max-budget-usd`) | `2.00` |
 | `MCP_MEMORY_DB_PATH` | Path to SQLite-vec memory database | `~/.pirandello/memory.db` |
 | `SYNTHESIS_DAY` | Day-of-week for synthesis guard (0=Sunday) | `0` |
 | `DAILY_BRIEFER_TARGET` | Target time for daily briefer guard (HH:MM) | `06:45` |

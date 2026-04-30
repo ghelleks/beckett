@@ -17,32 +17,45 @@ _DEFAULT_YAML = """\
 # See: beckett doctor    — validate this file and the tool registry
 #      beckett loop --dry-run  — preview which guards would fire
 #
-# Each entry maps to a registered guard + agent pair.
+# Each entry maps id -> registered guard/agent pair (defaults: same name).
 # Remove entries your role doesn't need.
 
 observe:
   entries:
-    - id: ooda-observe
-      agent: ooda-observe
-
+    - id: beckett-observe
+      agent: beckett-observe
+    - id: beckett-observe-rss
+      agent: beckett-observe-rss
+    - id: beckett-observe-context-refresh
+      agent: beckett-observe-context-refresh
 orient:
   entries:
-    - id: email-classifier
-      agent: email-classifier
-    # Uncomment for the personal role only:
-    # - id: mask-ooda-orient-synthesis
-    #   agent: mask-ooda-orient-synthesis
-
+    - id: beckett-orient-decisions
+      agent: beckett-orient-decisions
+    - id: beckett-orient-email
+      agent: beckett-orient-email
+    - id: beckett-orient-hygiene
+      agent: beckett-orient-hygiene
+    - id: beckett-orient-reply-drafter
+      agent: beckett-orient-reply-drafter
+    - id: beckett-orient-todo-forwarder
+      agent: beckett-orient-todo-forwarder
+    - id: beckett-orient-meeting-prep
+      agent: beckett-orient-meeting-prep
+    - id: beckett-orient-post-meeting
+      agent: beckett-orient-post-meeting
 act:
   entries:
-    - id: daily-briefer
-      agent: daily-briefer
-    - id: ooda-act
-      agent: ooda-act
-
-# Active-hours gate (daemon mode only). Guards are skipped outside this window.
-# Remove this line to run at any hour.
-active_hours: "09:00-17:00"
+    - id: beckett-act
+      agent: beckett-act
+    - id: beckett-scheduled-staff-update-draft
+      agent: beckett-scheduled-staff-update-draft
+    - id: beckett-scheduled-efficiency-log
+      agent: beckett-scheduled-efficiency-log
+    - id: beckett-scheduled-efficiency-email
+      agent: beckett-scheduled-efficiency-email
+    - id: beckett-scheduled-desktop-archive
+      agent: beckett-scheduled-desktop-archive
 
 # Daemon loop interval. Overridden by --interval or BECKETT_LOOP_INTERVAL.
 interval_minutes: 15

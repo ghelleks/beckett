@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.resources
 import logging
+import os
 import shlex
 import subprocess
 from pathlib import Path
@@ -115,3 +117,99 @@ def invoke_claude(deps: RoleDeps, skill_prompt: str, *, timeout: int | None = No
     except subprocess.TimeoutExpired:
         log.error("LLM subprocess timed out (%ss) for role=%s", tmo, deps.role)
         raise
+
+
+def _beckett_data_dir() -> Path:
+    """Resolve the bundled `_data/` plugin directory."""
+    candidate = Path(__file__).resolve().parent.parent / "_data"
+    if candidate.is_dir():
+        return candidate
+    try:
+        root = importlib.resources.files("beckett") / "_data"
+        with importlib.resources.as_file(root) as p:
+            return Path(p)
+    except Exception:
+        return candidate
+
+
+def _agent_subprocess_env(deps: RoleDeps) -> dict[str, str]:
+    env = {**dict(os.environ), **deps.env}
+    env["MASKS_BASE"] = str(deps.masks_base)
+    env["MASKS_ROLE"] = deps.role
+    env["MASKS_ROLE_DIR"] = str(deps.role_dir)
+    env["BECKETT_ROLE"] = deps.role
+    env["BECKETT_ROLE_DIR"] = str(deps.role_dir)
+    return env
+
+
+def invoke_claude_agent(
+    name: str,
+    prompt: str,
+    deps: RoleDeps,
+    budget_usd: float | None = None,
+    *,
+    prepend_stack: bool = True,
+) -> str:
+    """Invoke a bundled Claude Code agent by name from the role directory."""
+    raw_budget = deps.env.get("BECKETT_AGENT_BUDGET_USD", "").strip()
+    try:
+        default_budget = float(raw_budget or "2.00")
+    except ValueError:
+        default_budget = 2.00
+    budget = budget_usd if budget_usd is not None else default_budget
+
+    data_dir = _beckett_data_dir()
+    stdin_text = (
+        f"{build_prompt_stack(deps)}\n---\n{prompt}" if prepend_stack else prompt
+    )
+    argv = [
+        "claude",
+        "-p",
+        "--agent",
+        name,
+        "--plugin-dir",
+        str(data_dir),
+        "--permission-mode",
+        "auto",
+        "--output-format",
+        "json",
+        "--max-budget-usd",
+        str(budget),
+    ]
+    env = _agent_subprocess_env(deps)
+    raw_timeout = env.get("BECKETT_LLM_TIMEOUT", "1800").strip()
+    try:
+        tmo_sec = float(raw_timeout or "0") or None
+        if tmo_sec is not None and tmo_sec <= 0:
+            tmo_sec = None
+    except ValueError:
+        tmo_sec = 1800.0
+
+    try:
+        proc = subprocess.run(
+            argv,
+            input=stdin_text,
+            capture_output=True,
+            text=True,
+            cwd=str(deps.role_dir),
+            env=env,
+            timeout=tmo_sec,
+        )
+        if proc.returncode != 0:
+            err = proc.stderr.strip()[:500] if proc.stderr else ""
+            log.warning(
+                "invoke_claude_agent %s exit %d role=%s: %s",
+                name,
+                proc.returncode,
+                deps.role,
+                err,
+            )
+        return proc.stdout
+    except subprocess.TimeoutExpired:
+        log.error(
+            "invoke_claude_agent timed out (%ss) name=%s role=%s", tmo_sec, name, deps.role
+        )
+        raise
+    except Exception as exc:
+        log.warning("invoke_claude_agent failed name=%s role=%s: %s", name, deps.role, exc)
+        return ""

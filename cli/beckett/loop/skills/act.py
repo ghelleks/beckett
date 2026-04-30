@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import subprocess
+from datetime import datetime, timezone
 
 from pydantic import BaseModel
 from pydantic_ai import Agent, RunContext
 
 from beckett.loop.deps import RoleDeps
+from beckett.loop.phase_state import save_phase_state
 from beckett.loop.skill_agent import build_skill_agent, run_agent
 from beckett.loop.spec import GuardOutcome
 
@@ -176,4 +178,8 @@ async def act_agent(deps: RoleDeps, guard: GuardOutcome, context: dict | None = 
     )
 
     fallback: dict = {"executed": 0, "failed": 0, "task_ids": []}
-    return await run_agent(_act_agent, prompt, deps, fallback_result=fallback)
+    out = await run_agent(_act_agent, prompt, deps, fallback_result=fallback)
+    if guard.triggered:
+        deps.phase_state.last_act = datetime.now(timezone.utc)
+        save_phase_state(deps.role_dir, deps.phase_state)
+    return out
